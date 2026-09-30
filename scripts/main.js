@@ -5,6 +5,7 @@ import { SFX } from "./audio.js";
 import { EnemyManager, ENEMY_NAMES, ENEMY_TUNING } from "./enemies.js";
 import { buildMap } from "./map.js";
 import { ViewArms, ARM_ANCHORS, ELBOWS } from "./viewarms.js";
+import { roundedBox } from "./model_geometry.js";
 import {
   SKINS, STOCK, DEFAULT_SKIN, DEFAULT_MUZZLE,
   skinsFor, findSkin, isSkinned, skinLabel,
@@ -41,8 +42,9 @@ const deathFillEl = document.getElementById("deathFill");
 // ---------- 常量 ----------
 const EYE = 1.62;
 const CROUCH_EYE = 1.02;
+const CROUCH_TOP = 1.24;
 const PLAYER_RADIUS = 0.45;
-// 站立时头顶的高度（下蹲不参与判定：碰撞体是按「站着能不能过」算的）。
+// 站立时头顶的高度；蹲伏时由 CROUCH_TOP 降低，允许从低矮悬空物下方通过。
 // 只被 colliders 的 y0 用到 —— 判断一个悬空物（天桥 / 舱室屋顶）是在头顶还是在身前。
 const PLAYER_TOP = 1.78;
 // 一个「台阶」的最大高度：矮于它的碰撞体不挡人，只当作可以迈上去的台面。
@@ -64,6 +66,10 @@ const JUMP_BUFFER = 0.12;
 const BASE_FOV = 75;
 const SCOPE_FOV = 22;  // 一级镜
 const SCOPE_FOV2 = 11; // 二级镜（CF 的 AWM 是两级变倍）
+const pageParams = new URLSearchParams(location.search);
+const DEBUG_MODE = pageParams.has("debug");
+// 自动预览和鼠标输入使用同一个开关；普通入口仍经过 Pointer Lock。
+const PREVIEW_INPUT = DEBUG_MODE && pageParams.has("play");
 
 // ---------- 渲染器 / 场景 / 相机 ----------
 const renderer = new THREE.WebGLRenderer({ antialias: true });
@@ -198,6 +204,74 @@ function cur() { return owned[currentId]; }
 // 与枪口火光同一套模式（attachMuzzleTo），免得每把枪各养一双永远看不见的手。
 const viewArms = new ViewArms();
 
+// 统一给低多边形 GLB 加一套克制的枪械细节：连续的导轨、准星护圈、枪口环和拉机柄。
+// 这些部件不替换原模型的材质，只补齐第一人称最容易读到的轮廓，让 AK/M4/AWM 在同一套
+// 蓝灰甲板光照下都具备“成品枪”的结构层次。形状采用圆角体和圆柱，避免再出现硬方块。
+function addWeaponDetail(gun, geometry, material, position, rotation = null) {
+  const mesh = new THREE.Mesh(geometry, material);
+  mesh.position.copy(position);
+  if (rotation) mesh.rotation.set(rotation.x, rotation.y, rotation.z);
+  mesh.castShadow = false;
+  mesh.receiveShadow = false;
+  mesh.frustumCulled = false;
+  mesh.userData.weaponDetail = true;
+  gun.add(mesh);
+  return mesh;
+}
+
+function addWeaponAccessories(def, gun) {
+  const railMat = new THREE.MeshPhysicalMaterial({
+    color: 0x12171a, roughness: 0.29, metalness: 0.78,
+    clearcoat: 0.42, clearcoatRoughness: 0.14,
+  });
+  const polymerMat = new THREE.MeshPhysicalMaterial({
+    color: 0x222a28, roughness: 0.54, metalness: 0.36,
+    clearcoat: 0.18, clearcoatRoughness: 0.24,
+  });
+  const edgeMat = new THREE.MeshPhysicalMaterial({
+    color: 0x68716e, roughness: 0.36, metalness: 0.68,
+    clearcoat: 0.26, clearcoatRoughness: 0.2,
+  });
+  const len = def.targetLen;
+
+  if (def.type === "rifle" || def.type === "sniper") {
+    // 顶部一体式导轨，带圆角边缘；导轨长度按枪身比例缩放。
+    addWeaponDetail(gun, roundedBox(0.052, 0.018, Math.min(len * 0.50, 0.46)), railMat,
+      new THREE.Vector3(0, 0.075, 0.015));
+    // 前准星底座 + 护圈：比单独一根方柱更接近真实枪械的机械结构。
+    addWeaponDetail(gun, roundedBox(0.022, 0.050, 0.018), railMat,
+      new THREE.Vector3(0, 0.108, -len * 0.37));
+    addWeaponDetail(gun, new THREE.TorusGeometry(0.019, 0.0035, 6, 14).rotateX(Math.PI / 2), edgeMat,
+      new THREE.Vector3(0, 0.132, -len * 0.37));
+    // 枪口制退器和套筒环在开火时会形成清晰的黑色端部，不会盖住原模型枪管。
+    addWeaponDetail(gun, new THREE.CylinderGeometry(0.026, 0.030, 0.058, 12), railMat,
+      new THREE.Vector3(0, 0.018, -len * 0.50), new THREE.Vector3(Math.PI / 2, 0, 0));
+    addWeaponDetail(gun, new THREE.TorusGeometry(0.029, 0.0035, 6, 16).rotateX(Math.PI / 2), edgeMat,
+      new THREE.Vector3(0, 0.018, -len * 0.455));
+    // 拉机柄是第一人称右侧很容易看到的小亮点，位置保持在枪身上方。
+    addWeaponDetail(gun, roundedBox(0.040, 0.012, 0.034), polymerMat,
+      new THREE.Vector3(0.025, 0.092, len * 0.17));
+  } else if (def.type === "pistol") {
+    // 手枪套筒上的低矮瞄具和枪口环，避免原始 GLB 在视模里只剩一块黑色条。
+    addWeaponDetail(gun, roundedBox(0.036, 0.012, 0.16), railMat,
+      new THREE.Vector3(0, 0.060, -0.015));
+    addWeaponDetail(gun, roundedBox(0.014, 0.030, 0.016), edgeMat,
+      new THREE.Vector3(0, 0.079, -len * 0.36));
+    addWeaponDetail(gun, new THREE.CylinderGeometry(0.021, 0.024, 0.035, 12), railMat,
+      new THREE.Vector3(0, 0.015, -len * 0.49), new THREE.Vector3(Math.PI / 2, 0, 0));
+  } else if (def.type === "melee") {
+    // 匕首护手用细环收边，提升金属刃与握柄之间的分界。
+    addWeaponDetail(gun, new THREE.TorusGeometry(0.050, 0.006, 6, 18), edgeMat,
+      new THREE.Vector3(0, 0.005, 0), new THREE.Vector3(Math.PI / 2, 0, 0));
+  } else if (def.type === "grenade") {
+    // 投掷物的保险环与压片让手雷在近景里有可读的操作部件。
+    addWeaponDetail(gun, new THREE.TorusGeometry(0.025, 0.004, 6, 16), edgeMat,
+      new THREE.Vector3(0, 0.072, 0.012), new THREE.Vector3(Math.PI / 2, 0, 0));
+    addWeaponDetail(gun, roundedBox(0.040, 0.009, 0.018), polymerMat,
+      new THREE.Vector3(0.018, 0.090, 0.010));
+  }
+}
+
 // ---------- 通用武器 GLB 加载 ----------
 function loadWeapon(def) {
   return new Promise((resolve) => {
@@ -278,15 +352,7 @@ function loadWeapon(def) {
 
         const group = new THREE.Group();
         group.add(gun);
-        // A restrained factory-finished accessory rail: a thin matte rail and front sight give the
-        // normalized GLBs a coherent silhouette without hiding their authored geometry.
-        if (["rifle", "sniper"].includes(def.type)) {
-          const railMat = new THREE.MeshPhysicalMaterial({ color: 0x161b1d, roughness: 0.34, metalness: 0.72, clearcoat: 0.38, clearcoatRoughness: 0.16 });
-          const rail = new THREE.Mesh(new THREE.BoxGeometry(0.052, 0.018, Math.min(def.targetLen * 0.48, 0.45)), railMat);
-          rail.position.set(0, 0.075, 0.015); rail.castShadow = false; rail.frustumCulled = false; gun.add(rail);
-          const sight = new THREE.Mesh(new THREE.BoxGeometry(0.025, 0.06, 0.025), railMat);
-          sight.position.set(0, 0.11, -def.targetLen * 0.37); sight.castShadow = false; sight.frustumCulled = false; gun.add(sight);
-        }
+        addWeaponAccessories(def, gun);
         group.visible = false;
         // 挂到**视模相机**而不是主相机：组局部坐标 = 相机空间，所以武器/手臂的摆放一无变化，
         // 但它从此只在视模通道里被画出来，不会插进集装箱。
@@ -1472,9 +1538,11 @@ function fire() {
     }
   }
 
-  // 本枪后坐：枪口上抬 + 轻微横向晃动（仅临时偏移，不写入 player.pitch/yaw）
-  recoilPitch += (def.type === "sniper" ? 0.05 : 0.008) + Math.random() * 0.004;
-  recoilYaw += (Math.random() - 0.5) * (def.type === "sniper" ? 0.02 : 0.006);
+  // 本枪后坐：枪口上抬 + 轻微横向晃动（仅临时偏移，不写入 player.pitch/yaw）。
+  // 蹲下时同时降低相机后坐与视模后坐，避免只压枪模、准星却仍大幅跳动。
+  const recoilScale = player.crouching ? 0.58 : 1;
+  recoilPitch += ((def.type === "sniper" ? 0.05 : 0.008) + Math.random() * 0.004) * recoilScale;
+  recoilYaw += (Math.random() - 0.5) * (def.type === "sniper" ? 0.02 : 0.006) * recoilScale;
 
   // CF 惯例：狙击枪一枪打出即强制退镜，要重新右键上膛再瞄（也顺带避免
   // 0.05 的狙击后坐在 22° 视场里被放大 4 倍糊住画面）
@@ -1887,8 +1955,21 @@ document.addEventListener("keyup", (e) => {
     crouchDownAt = -1;
   }
 });
-// 切走窗口时 keyup 收不到，战绩面板会一直挂着，所以失焦也要收起来
-window.addEventListener("blur", () => showScoreboard(false));
+// 失焦或离开画布时可能收不到 mouseup，清掉连射，防止回来后自动续火。
+function releaseTrigger() { fireEnabled = false; }
+window.addEventListener("blur", () => { releaseTrigger(); showScoreboard(false); });
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) releaseTrigger();
+});
+viewport.addEventListener("mouseleave", () => {
+  if (!locked) releaseTrigger();
+});
+
+function canUseWeaponInput() {
+  return gameReady && state === "playing" && !dead && !document.hidden
+    && menu.classList.contains("hidden") && gameover.classList.contains("hidden")
+    && (locked || PREVIEW_INPUT);
+}
 
 function reportLockError() {
   const note = document.getElementById(state === "over" ? "restartNote" : "menuNote");
@@ -1907,6 +1988,7 @@ document.getElementById("startBtn").addEventListener("click", () => { sfx.ensure
 document.getElementById("restartBtn").addEventListener("click", () => { sfx.ensure(); requestLock(); });
 
 document.addEventListener("pointerlockchange", () => {
+  releaseTrigger();
   locked = document.pointerLockElement === viewport;
   if (locked) {
     hud.classList.remove("hidden");
@@ -1958,12 +2040,16 @@ function isSecondaryClick(e) {
 document.addEventListener("mousedown", (e) => {
   // 死亡期间整体不响应：既不能开镜，也不能把 fireEnabled 置 true
   // （按住不放的话，复活那一刻全自动枪会立刻续火）
-  if (!locked || state !== "playing" || dead) return;
+  if (!canUseWeaponInput()) return;
+  // 无锁预览仅接收画布点击，背包按钮等界面操作不能触发开火或开镜。
+  if (!locked && !viewport.contains(e.target)) return;
+  // 自动预览跳过了开始按钮，首次鼠标操作也需要解锁枪声音频。
+  if (e.button === 0 || isSecondaryClick(e)) sfx.ensure();
   if (isSecondaryClick(e)) { e.preventDefault(); cycleScope(); return; }
   if (e.button === 0) { fireEnabled = true; fire(); }
 });
 document.addEventListener("mouseup", (e) => {
-  if (e.button === 0 || e.which === 1) fireEnabled = false;
+  if (e.button === 0 || e.which === 1) releaseTrigger();
 });
 // pointer lock 下右键仍会冒泡出右键菜单。这里不再只看 locked：
 // 只要已经进了战场就挡掉，避免「锁掉了 → 菜单弹出 → 右键像没反应」。
@@ -1972,7 +2058,7 @@ document.addEventListener("contextmenu", (e) => {
 });
 // 键盘兜底：V 也能开镜（鼠标右键万一被系统/驱动吃掉时仍有路可走）
 document.addEventListener("keydown", (e) => {
-  if (e.code !== "KeyV" || state !== "playing" || !locked) return;
+  if (e.code !== "KeyV" || !canUseWeaponInput()) return;
   if (!(WEAPON_DEFS[currentId].stats || {}).zoom) return;
   e.preventDefault();
   cycleScope();
@@ -2141,13 +2227,43 @@ function updateTimerHud() {
 // 舱室屋顶）才需要写 y0 —— 那种东西的下方是要能走人的。少了这一条，一座 4.9m 高的
 // 天桥会把桥下的整条通道堵死（碰撞模型里没有「从下面穿过去」这个概念）。
 // 判据用「底面高过玩家头顶」而不是「高过脚底」：只要 y0 ≥ 脚底 + 身高，人就从底下过。
-function blockedBy(x, z, feetY) {
+function colliderBlocksBody(c, feetY, bodyTop = PLAYER_TOP) {
+  if (c.h <= feetY + STEP_H) return false;
+  if (c.y0 !== undefined && c.y0 >= feetY + bodyTop) return false;
+  return true;
+}
+
+function blockedBy(x, z, feetY, bodyTop = PLAYER_TOP) {
   for (const c of colliders) {
-    if (c.h <= feetY + STEP_H) continue;
-    if (c.y0 !== undefined && c.y0 >= feetY + PLAYER_TOP) continue;
+    if (!colliderBlocksBody(c, feetY, bodyTop)) continue;
     if (Math.abs(x - c.x) < c.hx + PLAYER_RADIUS && Math.abs(z - c.z) < c.hz + PLAYER_RADIUS) return c;
   }
   return null;
+}
+
+// 修复高速移动/出生点重叠后的穿模：只让玩家沿最短的水平轴退出箱体，
+// 不再用“当前已在箱内就放行”的兜底。那个旧兜底会让玩家继续穿过整只箱子。
+function depenetratePlayer(feetY, bodyTop) {
+  for (let pass = 0; pass < 4; pass++) {
+    let pushed = false;
+    for (const c of colliders) {
+      if (!colliderBlocksBody(c, feetY, bodyTop)) continue;
+      const px = c.hx + PLAYER_RADIUS - Math.abs(player.pos.x - c.x);
+      const pz = c.hz + PLAYER_RADIUS - Math.abs(player.pos.z - c.z);
+      if (px <= 0 || pz <= 0) continue;
+      if (px < pz) {
+        const side = Math.sign(player.pos.x - c.x) || (player.vel.x >= 0 ? -1 : 1);
+        player.pos.x += side * (px + 0.001);
+        player.vel.x = 0;
+      } else {
+        const side = Math.sign(player.pos.z - c.z) || (player.vel.z >= 0 ? -1 : 1);
+        player.pos.z += side * (pz + 0.001);
+        player.vel.z = 0;
+      }
+      pushed = true;
+    }
+    if (!pushed) break;
+  }
 }
 
 // 脚底落在哪 = (x,z) 处能站上去的最高台面（箱顶 / 走道 / 舱盖），默认甲板 0。
@@ -2208,16 +2324,16 @@ function movePlayer(dt) {
     sfx.jump();
   }
 
-  // 分轴移动 + 碰撞（高度感知）
-  // depenetration 兜底：若**当前**位置就已经在某个碰撞体里（复活点压着台阶、被挤进去），
-  // 一律放行，否则玩家会被永久钉死在原地 —— 探测时会真的卡住。
-  const stuck = blockedBy(player.pos.x, player.pos.z, player.pos.y);
+  // 分轴移动 + 碰撞（高度感知）。蹲下时身体高度降低，既能通过低矮悬空物，
+  // 又仍然会被箱体底座挡住。
+  const bodyTop = player.crouching ? CROUCH_TOP : PLAYER_TOP;
+  depenetratePlayer(player.pos.y, bodyTop);
   const nx = player.pos.x + player.vel.x * dt;
-  if (stuck || !blockedBy(nx, player.pos.z, player.pos.y)) player.pos.x = nx;
+  if (!blockedBy(nx, player.pos.z, player.pos.y, bodyTop)) player.pos.x = nx;
   else player.vel.x = 0;
 
   const nz = player.pos.z + player.vel.z * dt;
-  if (stuck || !blockedBy(player.pos.x, nz, player.pos.y)) player.pos.z = nz;
+  if (!blockedBy(player.pos.x, nz, player.pos.y, bodyTop)) player.pos.z = nz;
   else player.vel.z = 0;
 
   player.pos.x = Math.max(-bounds.hw, Math.min(bounds.hw, player.pos.x));
@@ -2290,14 +2406,16 @@ function triggerKick(id, seed) {
   const st = owned[id] && owned[id].state;
   if (!st || !st.ks) return;
   const kk = KICK[WEAPON_DEFS[id].type] || KICK.rifle;
+  // 蹲姿由腿部和肩膀共同支撑枪身，CF 式手感是明显但不过分的稳定增益。
+  const stance = player.crouching ? 0.58 : 1;
   const s = seed == null ? Math.random() * 2 - 1 : seed;
   const imp = (amp) => amp * kk.rate * Math.E; // 峰值 = v0/(rate·e)
   const add = (key, amp, dir) => { const a = st.ks[key]; a.amp = amp; a.v += imp(amp) * dir; };
-  add("back", kk.back, 1);
-  add("up", kk.up, 1);
-  add("pitch", kk.pitch, 1);
-  add("roll", kk.roll, s);
-  add("yaw", kk.yaw, s);
+  add("back", kk.back * stance, 1);
+  add("up", kk.up * stance, 1);
+  add("pitch", kk.pitch * stance, 1);
+  add("roll", kk.roll * stance, s);
+  add("yaw", kk.yaw * stance, s);
 }
 
 let bobT = 0;
@@ -2394,6 +2512,10 @@ function animateWeapon(dt) {
   else if (def.type === "grenade") { bx = 0.26; by = -0.14; bz = -0.52; }
   else if (def.type === "pistol") { bx = 0.40; by = -0.19; bz = -0.72; }
   else { bx = 0.32; by = -0.17; bz = -0.5; }
+  // 窄屏的水平视场更小，固定的右下握位会把枪和手一起裁出画面。
+  // 只压缩横向偏移，深度和高度不变：桌面宽屏保留 CF 式右下持枪，手机/竖向预览仍能看到手套。
+  const viewmodelFrame = THREE.MathUtils.clamp(camera.aspect / 1.5, 0.40, 1.0);
+  bx *= viewmodelFrame;
 
   // 换弹时的枪身位移：**往上抬、不往下沉**。
   // 这条是投影几何逼出来的，不是手感取舍 —— 弹匣井在枪局部 y=-0.155（枪身最下缘），
@@ -2655,7 +2777,7 @@ async function init() {
   gameReady = true;
   requestAnimationFrame(loop);
 
-  if (new URLSearchParams(location.search).has("debug")) {
+  if (DEBUG_MODE) {
     window.__tactical = {
       enemyManager, player, fire, WEAPON_STATE, camera, obstacleMeshes, THREE, scene,
       renderer, owned, cur, WEAPON_DEFS, smokes, grenadePool,
@@ -2886,4 +3008,4 @@ window.addEventListener("resize", () => {
 const initPromise = init();
 // The in-app browser cannot grant pointer lock, so this opt-in debug flag starts a
 // loaded match for visual QA without changing the normal menu flow.
-if (new URLSearchParams(location.search).has("play")) initPromise.then(() => gameStart());
+if (PREVIEW_INPUT) initPromise.then(() => gameStart());

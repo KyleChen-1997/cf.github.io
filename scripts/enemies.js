@@ -352,8 +352,45 @@ export class Enemy {
     // 兜底：任何非有限增量都不写进位置。NaN 一旦进了 position 就不会自愈
     // （后续每帧的 dist/atan2 全是 NaN），敌人会静默消失在场景里。
     if (!Number.isFinite(x) || !Number.isFinite(z)) return;
-    this.group.position.x += x;
-    this.group.position.z += z;
+    const colliders = this.colliders;
+    if (!colliders || !colliders.length) {
+      this.group.position.x += x;
+      this.group.position.z += z;
+      return;
+    }
+    const radius = 0.45;
+    const blocks = (px, pz) => colliders.some((c) => {
+      // 低矮走道是可迈上的地面；悬空桥面不应把敌人挡在桥下。
+      if (c.h <= 0.5) return false;
+      if (c.y0 !== undefined && c.y0 >= 1.2) return false;
+      return Math.abs(px - c.x) < c.hx + radius && Math.abs(pz - c.z) < c.hz + radius;
+    });
+    // 生成点或上一个大步长可能已经落在箱体里。沿最短轴推出去，
+    // 不能像旧逻辑那样无条件累加位移，否则敌人会从箱体另一侧穿出来。
+    for (let pass = 0; pass < 3; pass++) {
+      let pushed = false;
+      for (const c of colliders) {
+        if (c.h <= 0.5 || (c.y0 !== undefined && c.y0 >= 1.2)) continue;
+        const px = c.hx + radius - Math.abs(this.group.position.x - c.x);
+        const pz = c.hz + radius - Math.abs(this.group.position.z - c.z);
+        if (px <= 0 || pz <= 0) continue;
+        if (px < pz) {
+          const side = Math.sign(this.group.position.x - c.x) || (x >= 0 ? -1 : 1);
+          this.group.position.x += side * (px + 0.001);
+        } else {
+          const side = Math.sign(this.group.position.z - c.z) || (z >= 0 ? -1 : 1);
+          this.group.position.z += side * (pz + 0.001);
+        }
+        pushed = true;
+      }
+      if (!pushed) break;
+    }
+    const nx = this.group.position.x + x;
+    if (!blocks(nx, this.group.position.z)) this.group.position.x = nx;
+    else this.vel.x = 0;
+    const nz = this.group.position.z + z;
+    if (!blocks(this.group.position.x, nz)) this.group.position.z = nz;
+    else this.vel.z = 0;
   }
 
   applyFlash(dt) {

@@ -12,7 +12,7 @@
 // 骨段约定沿用 enemy_model.js 的 `limb()`：**从原点向局部 -y 伸展**。
 // 于是「把前臂指向肘部」就是 `fore.quaternion.setFromUnitVectors(DOWN, normalize(elbow - wrist))`。
 import * as THREE from "three";
-import { roundedBox } from "./model_geometry.js";
+import { roundedBox, ellipsoid, capsuleLimb } from "./model_geometry.js";
 import { detailMaterial } from "./surface_materials.js";
 
 const DOWN = new THREE.Vector3(0, -1, 0);
@@ -21,8 +21,10 @@ const _d = new THREE.Vector3();
 // 配色：**故意不用敌人那身近黑（0x1c1e21）**。枪本身就是近黑的，手再用同色，整块就是一团
 // 分不出结构的黑（第一版实测：放大到 4 倍也只看得出几片黑色平板，"手握枪"完全读不出来）。
 // 换成浅棕皮革 + 橄榄绿袖 —— 与敌人装备仍是同一套迷彩体系，但在枪身上有明确明暗对比。
-const GLOVE = 0x7a5f45;
-const SLEEVE = 0x474d3a;
+const GLOVE = 0x4b5549;
+const GLOVE_PANEL = 0x28312e;
+const SLEEVE = 0x3d493d;
+const CUFF = 0x202824;
 
 // ---------- 几何体全局共享（照抄 enemy_model.js 的惰性缓存：每把武器重建会漏 buffer geometry）----------
 // 手**不是**一个方盒：一个 0.09 的立方体在这个距离（离眼 0.4~0.7m）有 60~90px，光秃秃的方块
@@ -37,26 +39,17 @@ function geo() {
     g.translate(tx, ty, tz);
     return g;
   };
-  const limb = (rTop, rBot, len) => {
-    const g = new THREE.CylinderGeometry(rTop, rBot, len, 10);
-    g.translate(0, -len / 2, 0);
-    return g;
-  };
   GEO = {
-    // 掌：薄板贴在握把**后方**（+z 是朝玩家那一侧）。**宽度要小于握把的可见宽度**，
-    // 否则掌心把握把整个包住，画面里就只剩一块方板、枪不见了（第一版 0.078 实测如此）。
-    palm: box(0.070, 0.092, 0.048, 0, 0, 0.026),
-    // 四指：从掌的前缘向前伸、绕过握把正面。**绕的角度由 _buildArm 给的 rotation.y 负责**，
-    // 几何本身朝 -z 直伸。**指根必须和掌心有重叠**（-0.022 时指背 0.008 > 掌前缘 0.002），
-    // 取 -0.028 时两者正好在 0.002 相切 —— 一转过 0.55rad 就裂开一道缝，
-    // 看起来是一排悬空的板子而不是手（实测）。
-    finger: box(0.016, 0.030, 0.060, 0, -0.030, -0.022),
-    // 拇指：横贴掌的内侧（哪边是内由 _buildArm 按左右手镜像摆放）
-    thumb: box(0.024, 0.032, 0.054, 0, 0.030, -0.016),
-    // 前臂：0.50 长，够从手一直伸到画面外（实测到屏幕下缘只需 ~0.18m，留足余量）
-    // 前臂要够长：腕点到肘锚点实测 0.64m（静止位），太短的话换弹下探时前臂只画到一半，
-    // 画面里就只剩一只「悬空的手」（实测 0.50 时下探段完全读不出手臂）。
-    forearm: limb(0.044, 0.036, 0.62),
+    // 掌心、掌背和指节用椭球体组成，轮廓连续且会随光线产生自然的弧面高光。
+    // 这些尺寸保持原来的腕点和握把间距，只改变外轮廓，避免换弹锚点重新标定。
+    palm: ellipsoid(0.035, 0.046, 0.024, 16, 10).translate(0, 0, 0.026),
+    knuckle: ellipsoid(0.031, 0.019, 0.021, 14, 8).translate(0, 0.025, 0.010),
+    // 手指仍沿 z 轴扣住握把，但每根手指改成带圆头的椭球，而不是方盒。
+    finger: ellipsoid(0.009, 0.015, 0.030, 12, 8).translate(0, -0.029, -0.022),
+    thumb: ellipsoid(0.013, 0.017, 0.028, 12, 8).translate(0, 0.030, -0.016),
+    // 胶囊体保留前臂原本的长度和半径，同时让腕部、肘部自然收圆。
+    forearm: capsuleLimb(0.044, 0.62, 14, 5),
+    cuff: new THREE.TorusGeometry(0.044, 0.006, 6, 18).rotateX(Math.PI / 2).translate(0, -0.065, 0),
     // 换弹中段左手带的弹匣
     mag: box(0.030, 0.110, 0.070, 0, -0.058, 0),
   };
@@ -158,7 +151,9 @@ export class ViewArms {
     const G = geo();
     // 材质每个实例一份（与 SoldierRig 同理：将来若要做「受击/变色」不会互相串）
     this.matGlove = detailMaterial(GLOVE, "fabric", { roughness: 0.86, metalness: 0.03 });
+    this.matGlovePanel = detailMaterial(GLOVE_PANEL, "fabric", { roughness: 0.92, metalness: 0.02 });
     this.matSleeve = detailMaterial(SLEEVE, "camo", { roughness: 0.93, metalness: 0.02 });
+    this.matCuff = detailMaterial(CUFF, "fabric", { roughness: 0.90, metalness: 0.02 });
     this.matMag = new THREE.MeshStandardMaterial({ color: 0x2b2e33, roughness: 0.68, metalness: 0.28 });
 
     this.root = new THREE.Group();
@@ -189,7 +184,9 @@ export class ViewArms {
     // 手掌单独一组：将来若要按武器/握把角度调「手的俯仰」，只动这一组，
     // **不能**动 grp —— grp 的旋转会叠加到 fore 的四元数上，把前臂指歪（见 _aim）。
     const palm = new THREE.Group();
-    const parts = [new THREE.Mesh(G.palm, this.matGlove)];
+    const palmMesh = new THREE.Mesh(G.palm, this.matGlove);
+    const knuckleMesh = new THREE.Mesh(G.knuckle, this.matGlovePanel);
+    const parts = [palmMesh, knuckleMesh];
     for (const fx of FINGER_X) {
       const f = new THREE.Mesh(G.finger, this.matGlove);
       f.position.set(fx, 0, 0);
@@ -212,7 +209,8 @@ export class ViewArms {
     const fore = new THREE.Group();
     fore.position.set(0, -0.022, 0.030);
     const foreMesh = new THREE.Mesh(G.forearm, this.matSleeve);
-    fore.add(foreMesh);
+    const cuff = new THREE.Mesh(G.cuff, this.matCuff);
+    fore.add(foreMesh, cuff);
     grp.add(fore);
 
     // 换弹时左手拎着的弹匣（只在左手；右手那把枪的弹匣始终插在枪上）
@@ -223,7 +221,7 @@ export class ViewArms {
     mag.visible = false;
     grp.add(mag);
 
-    for (const o of [...parts, foreMesh, mag]) {
+    for (const o of [...parts, foreMesh, cuff, mag]) {
       o.frustumCulled = false;   // 视模紧贴相机，视锥剔除只会带来闪烁
       o.castShadow = false;
       o.receiveShadow = false;

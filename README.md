@@ -2,7 +2,7 @@
 
 穿越火线（CrossFire）风格的浏览器第一人称射击游戏。原生 HTML + Three.js，**无构建步骤、无 npm 依赖**，打开网页即可玩。
 
-**▶ 在线试玩：<https://tianlic2.github.io/cf-browser-game/>**
+**▶ 在线试玩：<https://kylechen-1997.github.io/cf.github.io/>**
 
 > 建议用桌面版 Chrome / Edge / Safari。进入战场后需要点击画面锁定鼠标指针（按 `Esc` 解锁）。
 

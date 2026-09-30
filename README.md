@@ -4,6 +4,8 @@
 
 **▶ 在线试玩：<https://kylechen-1997.github.io/cf.github.io/>**
 
+> GitHub Pages 由 `main` 的 Actions 工作流自动发布到 `gh-pages`。首次使用请在仓库 **Settings → Pages** 将发布源设为 `gh-pages` 分支的 `/ (root)`。
+
 > 建议用桌面版 Chrome / Edge / Safari。进入战场后需要点击画面锁定鼠标指针（按 `Esc` 解锁）。
 
 ## 玩法
